@@ -192,7 +192,7 @@ function homeScreen(err) {
       <button id="bGo" style="width:100%">Watch live</button>
       <p class="dim" style="font-size:13px;margin:10px 0 0">The owner gets a notification when someone watches.</p>
     </form>
-    <div class="row"><button class="ghost" id="bMine">📱 This is my phone</button><button class="ghost" id="bCam">💻 Be the camera</button></div>
+    <button class="ghost" id="bCam" style="width:100%">💻 Be the camera</button>
   </div>`;
   const $ = (id) => document.getElementById(id);
   $('nm').value = store.get('lc_name') || '';
@@ -203,7 +203,12 @@ function homeScreen(err) {
     viewerScreen(await keyFromPassword($('pw').value.trim()), name);
   };
   $('bCam').onclick = () => { store.set('lc_role', 'cam'); cameraScreen(); };
-  $('bMine').onclick = () => myPhoneSetup();
+  // Hidden for visitors: the owner presses and holds the "Laptop Cam" title for 2 seconds to set up their phone.
+  const title = app.querySelector('header'); let hold = 0;
+  title.style.userSelect = 'none'; title.style.webkitUserSelect = 'none';
+  title.addEventListener('contextmenu', (e) => e.preventDefault());
+  title.addEventListener('pointerdown', () => { clearTimeout(hold); hold = setTimeout(() => { if (navigator.vibrate) navigator.vibrate(60); myPhoneSetup(); }, 2000); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => title.addEventListener(ev, () => clearTimeout(hold)));
 }
 
 // Laptop: choose (or change) the password.
