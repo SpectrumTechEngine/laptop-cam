@@ -190,7 +190,7 @@ function homeScreen(err) {
       <button id="bGo" style="width:100%">Watch live</button>
       <p class="dim" style="font-size:13px;margin:10px 0 0">The owner gets a notification when someone watches.</p>
     </form>
-    <button class="ghost" id="bCam" style="width:100%">💻 Use this laptop as the camera</button>
+    <div class="row"><button class="ghost" id="bAl">🔔 Alerts${store.get('lc_push_id') ? ': on' : ''}</button><button class="ghost" id="bCam">💻 Be the camera</button></div>
   </div>`;
   const $ = (id) => document.getElementById(id);
   $('nm').value = store.get('lc_name') || '';
@@ -201,6 +201,7 @@ function homeScreen(err) {
     viewerScreen(await keyFromPassword($('pw').value.trim()), name);
   };
   $('bCam').onclick = () => { store.set('lc_role', 'cam'); cameraScreen(); };
+  $('bAl').onclick = () => alertsScreen();
 }
 
 // Laptop: choose (or change) the password.
@@ -230,10 +231,66 @@ function passwordScreen(changing) {
   $('bBack').onclick = () => { if (changing) location.reload(); else { store.del('lc_role'); homeScreen(); } };
 }
 
-// Phone alerts through the free ntfy app: the laptop sends a message to a private, random "topic".
-async function sendAlert(title, body) {
-  const topic = store.get('lc_topic'); if (!topic) return false;
-  try { const r = await fetch('https://ntfy.sh/' + topic, { method: 'POST', body, headers: { Title: title, Tags: 'eyes', Priority: 'high' } }); return r.ok; } catch { return false; }
+// Phone alerts: our own small server (Cloud Function "laptopCam" in chopthecheck) sends the notifications.
+const FN = 'https://europe-west1-chopthecheck.cloudfunctions.net/laptopCam';
+async function callFn(o) {
+  try { const r = await fetch(FN, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }); return { status: r.status, ...(await r.json().catch(() => ({}))) }; }
+  catch { return { status: 0 }; }
+}
+const pushOK = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+// Phone: turn alerts on or off for this phone.
+function alertsScreen(note) {
+  const on = store.get('lc_push_id');
+  app.innerHTML = `<div class="wrap">
+    <header><img src="icon-192.png" alt=""><h1>Laptop Cam</h1></header>
+    ${on ? `<div class="card"><b style="font-size:19px">🔔 Alerts are on</b>
+      <p class="dim" style="margin:6px 0 12px">This phone gets a notification whenever someone starts watching (but not when you watch from this phone).</p>
+      <div class="err" id="err" style="color:var(--ok)">${note ? esc(note) : ''}</div>
+      <div class="row"><button id="bTest">Send a test alert</button><button class="ghost" id="bOff">Turn off</button></div></div>`
+    : `<form class="card" id="fAl"><b style="font-size:19px">🔔 Alerts on this phone</b>
+      <p class="dim" style="margin:6px 0 12px">Get a notification when someone starts watching. Enter the camera password, then tap <b>Allow</b> when the phone asks.</p>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="Password" required>
+      <div class="err" id="err">${note ? esc(note) : ''}</div>
+      <button id="bOn" style="width:100%">Turn on alerts</button></form>`}
+    <button class="ghost" id="bBack" style="width:100%">‹ Back</button>
+  </div>`;
+  const $ = (id) => document.getElementById(id);
+  $('bBack').onclick = () => homeScreen();
+  if (on) {
+    $('bTest').onclick = async () => {
+      $('bTest').textContent = 'Sending…';
+      const r = await callFn({ op: 'send', room: store.get('lc_push_room'), title: '👁 Laptop Cam test', body: 'Alerts are working on this phone.' });
+      $('bTest').textContent = r.status === 200 && r.sent ? 'Sent ✓' : r.status === 429 ? 'Wait a few seconds' : 'Could not send';
+    };
+    $('bOff').onclick = async () => {
+      try { const reg = await navigator.serviceWorker.ready; const s = await reg.pushManager.getSubscription(); if (s) await s.unsubscribe(); } catch {}
+      await callFn({ op: 'unsub', room: store.get('lc_push_room'), id: on });
+      store.del('lc_push_id'); store.del('lc_push_room'); alertsScreen();
+    };
+    return;
+  }
+  $('fAl').onsubmit = async (e) => {
+    e.preventDefault();
+    const err = (m) => { $('err').textContent = m; $('bOn').disabled = false; $('bOn').textContent = 'Turn on alerts'; };
+    if (!pushOK()) return err('This browser can\'t get alerts. On Android use Chrome; on iPhone, add Laptop Cam to the home screen first and open it from there.');
+    $('bOn').disabled = true; $('bOn').textContent = 'Turning on…';
+    if (await Notification.requestPermission() !== 'granted') return err('Notifications are blocked. Allow them for this site in the browser\'s settings, then try again.');
+    const k = await keyFromPassword($('pw').value.trim()); await useKey(k);
+    // Is there a camera with this password? (Only a warning: the laptop might just be off.)
+    let found = false;
+    try { const { dbM, db } = await base(); const v = (await dbM.get(dbM.ref(db, 'rooms/laptop-cam-' + ROOM + '/peers'))).val() || {}; found = Object.values(v).some((d) => d && d.p && d.p.r === 'cam'); } catch {}
+    try {
+      const kr = await callFn({ op: 'key' }); if (!kr.key) return err('Could not reach the alert server. Check the internet.');
+      const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
+      const old = await reg.pushManager.getSubscription(); if (old) await old.unsubscribe();
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(kr.key) });
+      const r = await callFn({ op: 'sub', room: ROOM, sub: sub.toJSON() });
+      if (!r.id) return err('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '.'));
+      store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
+      alertsScreen(found ? 'Done ✓' : 'Done. Your laptop camera isn\'t online right now, so double-check the password was right.');
+    } catch (x) { err('Could not turn on alerts: ' + (x && x.message)); }
+  };
 }
 
 // ---------- the laptop (camera) ----------
@@ -352,33 +409,17 @@ async function cameraScreen() {
     const line = `${who.n ? who.n : 'Someone'} (${who.d || 'unknown device'}) at ${when}`;
     $('who').hidden = false;
     const li = document.createElement('li'); li.textContent = line; $('whoList').prepend(li);
-    sendAlert('👁 Laptop Cam is being watched', `${who.n ? who.n + ' started' : 'Someone started'} watching on ${who.d ? 'an ' + who.d : 'a device'} at ${when}.`.replace('an computer', 'a computer'));
+    callFn({ op: 'send', room: ROOM, skip: who.pid || '', title: '👁 Laptop Cam is being watched', body: `${who.n ? who.n + ' started' : 'Someone started'} watching on ${who.d === 'computer' ? 'a computer' : who.d ? 'an ' + who.d : 'a device'} at ${when}.` });
   }
 
-  function alertsCard() {
-    const topic = store.get('lc_topic'), box = $('alertBox');
-    if (!topic) {
-      box.innerHTML = `<b>📣 Phone alerts: off</b>
-        <p class="dim" style="margin:6px 0 12px">Get a notification on your phone whenever someone starts watching.</p>
-        <button id="bAlertOn" style="width:100%">Set up phone alerts</button>`;
-      $('bAlertOn').onclick = () => {
-        const abc = 'abcdefghjkmnpqrstuvwxyz23456789', r = crypto.getRandomValues(new Uint8Array(10));
-        store.set('lc_topic', 'lapcam-' + [...r].map((x) => abc[x % abc.length]).join(''));
-        alertsCard();
-      };
-      return;
-    }
-    box.innerHTML = `<b>📣 Phone alerts: on</b>
-      <ol class="dim"><li>On your phone, install the free app <b>ntfy</b> from the Play Store.</li>
-      <li>Open it, tap <b>+</b>, and type this topic name exactly:</li></ol>
-      <div class="topic">${esc(topic)}</div>
-      <ol class="dim" start="3"><li>Tap <b>Subscribe</b>, then press <b>Send a test alert</b> below.</li></ol>
-      <p class="dim" style="font-size:13px">Keep the topic name private: anyone who has it can see your alerts.</p>
-      <div class="row"><button id="bTest">Send a test alert</button><button class="ghost" id="bAlertOff">Turn off</button></div>`;
-    $('bTest').onclick = async () => { $('bTest').textContent = 'Sending…'; $('bTest').textContent = await sendAlert('👁 Laptop Cam test', 'Phone alerts are working.') ? 'Sent ✓' : 'Could not send. Check the internet'; };
-    $('bAlertOff').onclick = () => { if (confirm('Turn off phone alerts?')) { store.del('lc_topic'); alertsCard(); } };
-  }
-  alertsCard();
+  $('alertBox').innerHTML = `<b>🔔 Phone alerts</b>
+    <p class="dim" style="margin:6px 0 12px">To get a notification when someone starts watching: open Laptop Cam on your phone, tap <b>🔔 Alerts</b>, and enter this camera's password.</p>
+    <button class="ghost" id="bTest" style="width:100%">Send a test alert to my phones</button>`;
+  $('bTest').onclick = async () => {
+    $('bTest').textContent = 'Sending…';
+    const r = await callFn({ op: 'send', room: ROOM, title: '👁 Laptop Cam test', body: 'Alerts from your laptop are working.' });
+    $('bTest').textContent = r.status !== 200 ? (r.status === 429 ? 'Wait a few seconds and try again' : 'Could not reach the alert server') : r.phones ? `Sent to ${r.sent} phone${r.sent === 1 ? '' : 's'} ✓` : 'No phones have alerts turned on yet';
+  };
 
   try {
     room = await joinRoom(onPeers, (on) => { online = on; show(); });
@@ -482,7 +523,7 @@ async function viewerScreen(k, name) {
     try {
       const r = await joinRoom(onPeers, (on) => { if (!on) pill('No internet', ''); });
       if (g !== gen) return r.leave();
-      room = r; await room.set({ r: 'view', w: watch, who: await lock({ n: name || '', d: device() }) });
+      room = r; await room.set({ r: 'view', w: watch, who: await lock({ n: name || '', d: device(), pid: store.get('lc_push_room') === ROOM ? store.get('lc_push_id') || '' : '' }) });
       // Nothing answers this password: either it's wrong or the laptop is off.
       if (!everSeen) setTimeout(async () => {
         if (everSeen || g !== gen) return;
@@ -512,7 +553,7 @@ async function viewerScreen(k, name) {
 
 window.__lc = { store };
 boot();
-if ('serviceWorker' in navigator && !LOCAL) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && !FAKE) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
 </html>
