@@ -1,5 +1,5 @@
 // Laptop Cam offline copy. Bump CACHE on every release.
-const CACHE = 'laptop-cam-v2';
+const CACHE = 'laptop-cam-v3';
 
 // Alerts: show the notification the alert server sent; tapping it opens Laptop Cam.
 self.addEventListener('push', (e) => {

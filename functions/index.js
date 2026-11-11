@@ -41,6 +41,16 @@ exports.laptopCam = onRequest({ region: 'europe-west1', cors: true, maxInstances
     if (!isRoom(b.room)) return res.status(400).json({ error: 'room' });
     const ref = db.ref('lcPush/' + b.room);
 
+    if (b.op === 'sub' && b.fcm) {
+      // The Android app: it signs up with a Firebase Cloud Messaging token instead
+      if (typeof b.fcm !== 'string' || b.fcm.length < 20 || b.fcm.length > 4096) return res.status(400).json({ error: 'fcm' });
+      const all = (await ref.get()).val() || {};
+      const id = crypto.createHash('sha256').update('fcm:' + b.fcm).digest('hex').slice(0, 20);
+      if (!all[id] && Object.keys(all).length >= 10) return res.status(429).json({ error: 'too many phones' });
+      await ref.child(id).set({ f: b.fcm, t: Date.now() });
+      return res.json({ ok: true, id });
+    }
+
     if (b.op === 'sub') {
       const s = b.sub || {};
       if (typeof s.endpoint !== 'string' || !/^https:\/\//.test(s.endpoint) || s.endpoint.length > 1000 || !s.keys || typeof s.keys.p256dh !== 'string' || typeof s.keys.auth !== 'string' || s.keys.p256dh.length > 200 || s.keys.auth.length > 100) return res.status(400).json({ error: 'sub' });
@@ -62,16 +72,28 @@ exports.laptopCam = onRequest({ region: 'europe-west1', cors: true, maxInstances
       const now = Date.now();
       const t = await last.transaction((cur) => (cur && now - cur < 5000) ? undefined : now);
       if (!t.committed) return res.status(429).json({ error: 'slow down' });
-      const msg = JSON.stringify({ title: text(b.title, 80) || 'Laptop Cam', body: text(b.body, 200), tag: 'laptop-cam' });
+      const title = text(b.title, 80) || 'Laptop Cam', body = text(b.body, 200);
+      const msg = JSON.stringify({ title, body, tag: 'laptop-cam' });
       const subs = (await ref.get()).val() || {};
       let sent = 0;
       await Promise.all(Object.entries(subs).map(async ([id, s]) => {
         if (id === b.skip) return;
         try {
-          await webpush.sendNotification({ endpoint: s.e, keys: { p256dh: s.p, auth: s.a } }, msg, { TTL: 3600, urgency: 'high' });
+          if (s.f) {
+            await admin.messaging().send({
+              token: s.f,
+              notification: { title, body },
+              android: { priority: 'high', ttl: 3600 * 1000, notification: { channelId: 'watch', tag: 'laptop-cam', sound: 'default', defaultVibrateTimings: true } },
+            });
+          } else {
+            await webpush.sendNotification({ endpoint: s.e, keys: { p256dh: s.p, auth: s.a } }, msg, { TTL: 3600, urgency: 'high' });
+          }
           sent++;
         } catch (e) {
-          if (e.statusCode === 404 || e.statusCode === 410) await ref.child(id).remove();   // phone unsubscribed
+          const gone = e.statusCode === 404 || e.statusCode === 410 ||
+            ['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(e.code);
+          if (gone) await ref.child(id).remove();   // phone uninstalled the app or turned alerts off
+          else console.warn('send failed', e.code || e.statusCode);
         }
       }));
       return res.json({ ok: true, sent, phones: Object.keys(subs).length });

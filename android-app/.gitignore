@@ -1,0 +1,9 @@
+node_modules/
+android/
+www/
+assets/
+*.apk
+*.idsig
+*.jks
+*.keystore
+build.log

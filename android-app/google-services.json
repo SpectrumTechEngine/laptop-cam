@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "506847790153",
+    "firebase_url": "https://chopthecheck-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "chopthecheck",
+    "storage_bucket": "chopthecheck.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:506847790153:android:9861d027e068664f31eb98",
+        "android_client_info": {
+          "package_name": "com.thespectrumtechengine.laptopcam"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCTkjozmFGhk4XZXxz4KgXxCihq74kwlnI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

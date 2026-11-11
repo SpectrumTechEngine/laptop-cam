@@ -170,6 +170,7 @@ async function keyFromPassword(pw) {
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode('laptop-cam/v1'), iterations: 310000 }, base, 256);
   return toB64u(bits);
 }
+const PHONE = /Android|iPhone|iPad/.test(navigator.userAgent);
 const device = () => /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Android/.test(navigator.userAgent) ? 'Android phone' : 'computer';
 
 // ---------- start ----------
@@ -237,7 +238,24 @@ async function callFn(o) {
   try { const r = await fetch(FN, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }); return { status: r.status, ...(await r.json().catch(() => ({}))) }; }
   catch { return { status: 0 }; }
 }
-const pushOK = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+// Inside the Android app (APK) we use Android's own notifications; in a browser, web notifications.
+const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const PN = () => NATIVE && window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+const pushOK = () => PN() || ('serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window);
+async function nativeToken() {
+  const pn = PN();
+  let perm = await pn.checkPermissions();
+  if (perm.receive !== 'granted') perm = await pn.requestPermissions();
+  if (perm.receive !== 'granted') throw new Error('blocked');
+  try { await pn.createChannel({ id: 'watch', name: 'Someone is watching', description: 'When someone starts watching your laptop camera', importance: 5, visibility: 1, vibration: true }); } catch {}
+  await pn.removeAllListeners();
+  return new Promise((ok, bad) => {
+    const t = setTimeout(() => bad(new Error('timed out')), 20000);
+    pn.addListener('registration', (r) => { clearTimeout(t); ok(r.value); });
+    pn.addListener('registrationError', (e) => { clearTimeout(t); bad(new Error(e && e.error || 'registration failed')); });
+    pn.register();
+  });
+}
 
 // Phone: turn alerts on or off for this phone.
 function alertsScreen(note) {
@@ -264,7 +282,10 @@ function alertsScreen(note) {
       $('bTest').textContent = r.status === 200 && r.sent ? 'Sent ✓' : r.status === 429 ? 'Wait a few seconds' : 'Could not send';
     };
     $('bOff').onclick = async () => {
-      try { const reg = await navigator.serviceWorker.ready; const s = await reg.pushManager.getSubscription(); if (s) await s.unsubscribe(); } catch {}
+      try {
+        if (PN()) await PN().unregister();
+        else { const reg = await navigator.serviceWorker.ready; const s = await reg.pushManager.getSubscription(); if (s) await s.unsubscribe(); }
+      } catch {}
       await callFn({ op: 'unsub', room: store.get('lc_push_room'), id: on });
       store.del('lc_push_id'); store.del('lc_push_room'); alertsScreen();
     };
@@ -275,11 +296,22 @@ function alertsScreen(note) {
     const err = (m) => { $('err').textContent = m; $('bOn').disabled = false; $('bOn').textContent = 'Turn on alerts'; };
     if (!pushOK()) return err('This browser can\'t get alerts. On Android use Chrome; on iPhone, add Laptop Cam to the home screen first and open it from there.');
     $('bOn').disabled = true; $('bOn').textContent = 'Turning on…';
-    if (await Notification.requestPermission() !== 'granted') return err('Notifications are blocked. Allow them for this site in the browser\'s settings, then try again.');
+    if (!PN() && await Notification.requestPermission() !== 'granted') return err('Notifications are blocked. Allow them for this site in the browser\'s settings, then try again.');
     const k = await keyFromPassword($('pw').value.trim()); await useKey(k);
     // Is there a camera with this password? (Only a warning: the laptop might just be off.)
     let found = false;
     try { const { dbM, db } = await base(); const v = (await dbM.get(dbM.ref(db, 'rooms/laptop-cam-' + ROOM + '/peers'))).val() || {}; found = Object.values(v).some((d) => d && d.p && d.p.r === 'cam'); } catch {}
+    if (PN()) {
+      try {
+        const token = await nativeToken();
+        const r = await callFn({ op: 'sub', room: ROOM, fcm: token });
+        if (!r.id) return err('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '. Check the internet.'));
+        store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
+        return alertsScreen(found ? 'Done ✓' : 'Done. Your laptop camera isn\'t online right now, so double-check the password was right.');
+      } catch (x) {
+        return err(x && x.message === 'blocked' ? 'Notifications are turned off for Laptop Cam. Turn them on in the phone\'s Settings → Apps → Laptop Cam → Notifications, then try again.' : 'Could not turn on alerts: ' + (x && x.message));
+      }
+    }
     try {
       const kr = await callFn({ op: 'key' }); if (!kr.key) return err('Could not reach the alert server. Check the internet.');
       const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
@@ -303,13 +335,17 @@ async function cameraScreen() {
     <div class="card"><div class="status"><span class="dot" id="dot"></span><span id="st">Starting…</span></div>
       <div class="dim" id="sub" style="margin-top:6px"></div>
       <video id="preview" muted playsinline autoplay></video></div>
+    <div class="card" id="camPick" hidden><b>Which camera</b>
+      <div class="row" style="margin-top:10px"><button class="ghost" id="bFront">🤳 Front</button><button class="ghost" id="bBack">📷 Back</button></div></div>
     <div class="card" id="alertBox"></div>
     <div class="card" id="who" hidden><b>Who watched</b><ul class="dim" id="whoList"></ul></div>
-    <div class="card"><b>To keep it working</b><ul class="dim">
+    <div class="card"><b>To keep it working</b><ul class="dim">${PHONE ? `
+      <li>Keep this app open on the screen and the phone plugged in.</li>
+      <li>Prop the phone up where you want it pointing.</li>` : `
       <li>Leave this page open (you can put other windows on top).</li>
       <li>Keep the laptop plugged in with the lid open.</li>
-      <li>Windows Settings → System → Power &amp; battery → set sleep "when plugged in" to <b>Never</b>.</li>
-      <li>The camera light only comes on while a phone is watching.</li></ul></div>
+      <li>Windows Settings → System → Power &amp; battery → set sleep "when plugged in" to <b>Never</b>.</li>`}
+      <li>The camera light only comes on while someone is watching.</li></ul></div>
     <div class="row"><button class="ghost" id="bPw">🔑 Change password</button><button class="ghost" id="bStop">Stop being the camera</button></div>
   </div>`;
   const $ = (id) => document.getElementById(id);
@@ -335,12 +371,35 @@ async function cameraScreen() {
     if (stream) return stream;
     if (FAKE) stream = fakeStream();
     else {
-      try { stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: { echoCancellation: true, noiseSuppression: true } }); }
-      catch { stream = await navigator.mediaDevices.getUserMedia({ video: true }); }
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(), audio: { echoCancellation: true, noiseSuppression: true } }); }
+      catch { stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted() }); }
     }
     preview.srcObject = stream; show();
     return stream;
   }
+
+  // Front or back camera (only offered when the device has more than one camera).
+  let facing = store.get('lc_facing') || (PHONE ? 'environment' : 'user');
+  const videoWanted = () => ({ facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } });
+  const showFacing = () => { $('bFront').className = facing === 'user' ? '' : 'ghost'; $('bBack').className = facing === 'environment' ? '' : 'ghost'; };
+  async function useFacing(f) {
+    if (f === facing) return;
+    facing = f; store.set('lc_facing', f); showFacing();
+    preview.style.transform = '';
+    if (!stream || FAKE) return;
+    // Swap the picture without dropping anyone who is watching
+    try {
+      const nv = (await navigator.mediaDevices.getUserMedia({ video: videoWanted() })).getVideoTracks()[0];
+      const old = stream.getVideoTracks()[0];
+      for (const c of pcs.values()) for (const s of c.pc.getSenders()) if (s.track && s.track.kind === 'video') await s.replaceTrack(nv);
+      if (old) { stream.removeTrack(old); old.stop(); }
+      stream.addTrack(nv); preview.srcObject = stream;
+    } catch (e) { console.warn('switch camera', e); $('sub').textContent = 'Could not switch camera.'; }
+  }
+  $('bFront').onclick = () => useFacing('user');
+  $('bBack').onclick = () => useFacing('environment');
+  showFacing();
+  try { if ((await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput').length > 1 || PHONE) $('camPick').hidden = false; } catch {}
   function maybeStop() {
     clearTimeout(stopTimer);
     if (viewers.length) return;

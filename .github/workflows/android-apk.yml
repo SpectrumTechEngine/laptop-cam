@@ -1,0 +1,56 @@
+# Every push to main builds a signed Android APK and publishes it as a GitHub Release.
+# Newest APK is always at:
+# https://github.com/SpectrumTechEngine/laptop-cam/releases/latest/download/laptop-cam.apk
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install build tools
+        working-directory: android-app
+        run: npm ci --no-audit --no-fund
+
+      - name: Build signed APK
+        working-directory: android-app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          KEYSTORE_PATH="$RUNNER_TEMP/release.jks" node build.mjs
+          rm "$RUNNER_TEMP/release.jks"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v1.${{ github.run_number }}" \
+            android-app/laptop-cam.apk \
+            --title "Laptop Cam 1.${{ github.run_number }}" \
+            --notes "Built automatically from ${{ github.sha }}." \
+            --latest

@@ -1,0 +1,10 @@
+{
+  "appId": "com.thespectrumtechengine.laptopcam",
+  "appName": "Laptop Cam",
+  "webDir": "www",
+  "backgroundColor": "#0d1b2a",
+  "server": {
+    "url": "https://thespectrumtechengine.com/laptop-cam/",
+    "errorPath": "index.html"
+  }
+}
