@@ -180,6 +180,7 @@ function boot() {
 }
 
 function homeScreen(err) {
+  if (store.get('lc_okey')) return ownerScreen(err);       // the owner's own phone
   app.innerHTML = `<div class="wrap">
     <header><img src="icon-192.png" alt=""><h1>Laptop Cam</h1></header>
     <form class="card" id="fView">
@@ -191,7 +192,7 @@ function homeScreen(err) {
       <button id="bGo" style="width:100%">Watch live</button>
       <p class="dim" style="font-size:13px;margin:10px 0 0">The owner gets a notification when someone watches.</p>
     </form>
-    <div class="row"><button class="ghost" id="bAl">🔔 Alerts${store.get('lc_push_id') ? ': on' : ''}</button><button class="ghost" id="bCam">💻 Be the camera</button></div>
+    <div class="row"><button class="ghost" id="bMine">📱 This is my phone</button><button class="ghost" id="bCam">💻 Be the camera</button></div>
   </div>`;
   const $ = (id) => document.getElementById(id);
   $('nm').value = store.get('lc_name') || '';
@@ -202,7 +203,7 @@ function homeScreen(err) {
     viewerScreen(await keyFromPassword($('pw').value.trim()), name);
   };
   $('bCam').onclick = () => { store.set('lc_role', 'cam'); cameraScreen(); };
-  $('bAl').onclick = () => alertsScreen();
+  $('bMine').onclick = () => myPhoneSetup();
 }
 
 // Laptop: choose (or change) the password.
@@ -257,71 +258,116 @@ async function nativeToken() {
   });
 }
 
-// Phone: turn alerts on or off for this phone.
-function alertsScreen(note) {
-  const on = store.get('lc_push_id');
+// Is the camera with the current password online right now?
+async function camOnline() {
+  try {
+    const { dbM, db } = await base();
+    const v = (await dbM.get(dbM.ref(db, 'rooms/laptop-cam-' + ROOM + '/peers'))).val() || {};
+    return Object.values(v).some((d) => d && d.p && d.p.r === 'cam' && now() - (Number(d.t) || 0) < FRESH);
+  } catch { return false; }
+}
+
+// Sign this phone up for alerts (uses the key already in use). Throws an Error with a plain message.
+async function turnOnAlerts() {
+  if (!pushOK()) throw new Error('This browser can\'t get alerts. Use the Laptop Cam app, or Chrome.');
+  if (PN()) {
+    let token;
+    try { token = await nativeToken(); }
+    catch (x) { throw new Error(x && x.message === 'blocked' ? 'Notifications are off for Laptop Cam. Turn them on in Settings → Apps → Laptop Cam → Notifications, then try again.' : 'Could not turn on alerts: ' + (x && x.message)); }
+    const r = await callFn({ op: 'sub', room: ROOM, fcm: token });
+    if (!r.id) throw new Error('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '. Check the internet.'));
+    store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
+    return;
+  }
+  if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications are blocked. Allow them for this site in the browser\'s settings, then try again.');
+  const kr = await callFn({ op: 'key' }); if (!kr.key) throw new Error('Could not reach the alert server. Check the internet.');
+  const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
+  const old = await reg.pushManager.getSubscription(); if (old) await old.unsubscribe();
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(kr.key) });
+  const r = await callFn({ op: 'sub', room: ROOM, sub: sub.toJSON() });
+  if (!r.id) throw new Error('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '.'));
+  store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
+}
+async function turnOffAlerts() {
+  const id = store.get('lc_push_id'), room = store.get('lc_push_room');
+  try {
+    if (PN()) await PN().unregister();
+    else { const reg = await navigator.serviceWorker.ready; const s = await reg.pushManager.getSubscription(); if (s) await s.unsubscribe(); }
+  } catch {}
+  if (id) await callFn({ op: 'unsub', room, id });
+  store.del('lc_push_id'); store.del('lc_push_room');
+}
+
+// "This is my phone": enter the password once; the phone remembers it and gets the alerts.
+function myPhoneSetup(err) {
   app.innerHTML = `<div class="wrap">
     <header><img src="icon-192.png" alt=""><h1>Laptop Cam</h1></header>
-    ${on ? `<div class="card"><b style="font-size:19px">🔔 Alerts are on</b>
-      <p class="dim" style="margin:6px 0 12px">This phone gets a notification whenever someone starts watching (but not when you watch from this phone).</p>
-      <div class="err" id="err" style="color:var(--ok)">${note ? esc(note) : ''}</div>
-      <div class="row"><button id="bTest">Send a test alert</button><button class="ghost" id="bOff">Turn off</button></div></div>`
-    : `<form class="card" id="fAl"><b style="font-size:19px">🔔 Alerts on this phone</b>
-      <p class="dim" style="margin:6px 0 12px">Get a notification when someone starts watching. Enter the camera password, then tap <b>Allow</b> when the phone asks.</p>
-      <input id="pw" type="password" autocomplete="current-password" placeholder="Password" required>
-      <div class="err" id="err">${note ? esc(note) : ''}</div>
-      <button id="bOn" style="width:100%">Turn on alerts</button></form>`}
+    <form class="card" id="fMine">
+      <b style="font-size:19px">📱 This is my phone</b>
+      <p class="dim" style="margin:6px 0 12px">Enter the camera password once. This phone will remember it, so you can watch with one tap, and it gets a notification whenever <b>someone else</b> starts watching.</p>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="Camera password" required>
+      <div class="err" id="err">${err ? esc(err) : ''}</div>
+      <button id="bSave" style="width:100%">Save</button>
+      <p class="dim" style="font-size:13px;margin:10px 0 0">Only do this on your own phone.</p>
+    </form>
     <button class="ghost" id="bBack" style="width:100%">‹ Back</button>
   </div>`;
   const $ = (id) => document.getElementById(id);
   $('bBack').onclick = () => homeScreen();
-  if (on) {
+  $('fMine').onsubmit = async (e) => {
+    e.preventDefault();
+    $('bSave').disabled = true; $('bSave').textContent = 'Checking…';
+    const k = await keyFromPassword($('pw').value.trim()); await useKey(k);
+    if (!await camOnline() && !confirm('No camera is online with that password right now.\n\nIf the laptop is just switched off, tap OK to save it anyway. If you might have typed it wrong, tap Cancel.')) {
+      $('bSave').disabled = false; $('bSave').textContent = 'Save'; return;
+    }
+    store.set('lc_okey', k); store.set('lc_name', 'Me');
+    let note = 'Saved ✓ Alerts are on.';
+    $('bSave').textContent = 'Turning on alerts…';
+    try { await turnOnAlerts(); } catch (x) { note = 'Saved ✓ But alerts are not on yet: ' + x.message; }
+    ownerScreen(null, note);
+  };
+}
+
+// The owner's phone: one-tap watch, camera status, alerts.
+async function ownerScreen(err, note) {
+  await useKey(store.get('lc_okey'));
+  const alertsOn = store.get('lc_push_id') && store.get('lc_push_room') === ROOM;
+  app.innerHTML = `<div class="wrap">
+    <header><img src="icon-192.png" alt=""><h1>Laptop Cam</h1></header>
+    <div class="card">
+      <div class="status"><span class="dot" id="dot"></span><span id="st">Checking the camera…</span></div>
+      <div class="err" id="err" style="margin:10px 0 0">${err ? esc(err) : ''}</div>
+      <button id="bWatch" style="width:100%;margin-top:12px;font-size:19px">📺 Watch live</button>
+    </div>
+    <div class="card"><b>${alertsOn ? '🔔 Alerts are on' : '🔕 Alerts are off'}</b>
+      <p class="dim" style="margin:6px 0 12px">${alertsOn ? 'This phone gets a notification when someone else starts watching. (Not when you watch.)' : 'Turn on to get a notification when someone else starts watching.'}</p>
+      <div class="err" id="note" style="color:${note && /not on yet/.test(note) ? '#ff8a95' : 'var(--ok)'}">${note ? esc(note) : ''}</div>
+      <div class="row">${alertsOn ? '<button id="bTest">Send a test alert</button><button class="ghost" id="bOff">Turn off</button>' : '<button id="bOn">Turn on alerts</button>'}</div>
+    </div>
+    <div class="row"><button class="ghost" id="bPw">🔑 New password</button><button class="danger" id="bForget">Not my phone</button></div>
+  </div>`;
+  const $ = (id) => document.getElementById(id);
+  camOnline().then((on) => { if (!$('st')) return; $('dot').className = 'dot ' + (on ? 'ok' : ''); $('st').textContent = on ? 'Camera is online' : 'Camera is offline'; });
+  $('bWatch').onclick = () => viewerScreen(store.get('lc_okey'), 'Me');
+  if (alertsOn) {
     $('bTest').onclick = async () => {
       $('bTest').textContent = 'Sending…';
-      const r = await callFn({ op: 'send', room: store.get('lc_push_room'), title: '👁 Laptop Cam test', body: 'Alerts are working on this phone.' });
+      const r = await callFn({ op: 'send', room: ROOM, title: '👁 Laptop Cam test', body: 'Alerts are working on this phone.' });
       $('bTest').textContent = r.status === 200 && r.sent ? 'Sent ✓' : r.status === 429 ? 'Wait a few seconds' : 'Could not send';
     };
-    $('bOff').onclick = async () => {
-      try {
-        if (PN()) await PN().unregister();
-        else { const reg = await navigator.serviceWorker.ready; const s = await reg.pushManager.getSubscription(); if (s) await s.unsubscribe(); }
-      } catch {}
-      await callFn({ op: 'unsub', room: store.get('lc_push_room'), id: on });
-      store.del('lc_push_id'); store.del('lc_push_room'); alertsScreen();
+    $('bOff').onclick = async () => { await turnOffAlerts(); ownerScreen(); };
+  } else {
+    $('bOn').onclick = async () => {
+      $('bOn').disabled = true; $('bOn').textContent = 'Turning on…';
+      try { await turnOnAlerts(); ownerScreen(null, 'Alerts are on ✓'); }
+      catch (x) { $('note').style.color = '#ff8a95'; $('note').textContent = x.message; $('bOn').disabled = false; $('bOn').textContent = 'Turn on alerts'; }
     };
-    return;
   }
-  $('fAl').onsubmit = async (e) => {
-    e.preventDefault();
-    const err = (m) => { $('err').textContent = m; $('bOn').disabled = false; $('bOn').textContent = 'Turn on alerts'; };
-    if (!pushOK()) return err('This browser can\'t get alerts. On Android use Chrome; on iPhone, add Laptop Cam to the home screen first and open it from there.');
-    $('bOn').disabled = true; $('bOn').textContent = 'Turning on…';
-    if (!PN() && await Notification.requestPermission() !== 'granted') return err('Notifications are blocked. Allow them for this site in the browser\'s settings, then try again.');
-    const k = await keyFromPassword($('pw').value.trim()); await useKey(k);
-    // Is there a camera with this password? (Only a warning: the laptop might just be off.)
-    let found = false;
-    try { const { dbM, db } = await base(); const v = (await dbM.get(dbM.ref(db, 'rooms/laptop-cam-' + ROOM + '/peers'))).val() || {}; found = Object.values(v).some((d) => d && d.p && d.p.r === 'cam'); } catch {}
-    if (PN()) {
-      try {
-        const token = await nativeToken();
-        const r = await callFn({ op: 'sub', room: ROOM, fcm: token });
-        if (!r.id) return err('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '. Check the internet.'));
-        store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
-        return alertsScreen(found ? 'Done ✓' : 'Done. Your laptop camera isn\'t online right now, so double-check the password was right.');
-      } catch (x) {
-        return err(x && x.message === 'blocked' ? 'Notifications are turned off for Laptop Cam. Turn them on in the phone\'s Settings → Apps → Laptop Cam → Notifications, then try again.' : 'Could not turn on alerts: ' + (x && x.message));
-      }
-    }
-    try {
-      const kr = await callFn({ op: 'key' }); if (!kr.key) return err('Could not reach the alert server. Check the internet.');
-      const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
-      const old = await reg.pushManager.getSubscription(); if (old) await old.unsubscribe();
-      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(kr.key) });
-      const r = await callFn({ op: 'sub', room: ROOM, sub: sub.toJSON() });
-      if (!r.id) return err('Could not turn on alerts' + (r.status === 429 ? ': too many phones already.' : '.'));
-      store.set('lc_push_id', r.id); store.set('lc_push_room', ROOM);
-      alertsScreen(found ? 'Done ✓' : 'Done. Your laptop camera isn\'t online right now, so double-check the password was right.');
-    } catch (x) { err('Could not turn on alerts: ' + (x && x.message)); }
+  $('bPw').onclick = async () => { await turnOffAlerts(); store.del('lc_okey'); myPhoneSetup(); };
+  $('bForget').onclick = async () => {
+    if (!confirm('Forget the password on this phone and stop its alerts?')) return;
+    await turnOffAlerts(); store.del('lc_okey'); store.del('lc_name'); homeScreen();
   };
 }
 
